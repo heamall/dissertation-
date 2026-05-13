@@ -1,0 +1,513 @@
+import os
+import re
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from matplotlib.lines import Line2D
+
+# ============================================================
+# FILE PATH
+# ============================================================
+file_path = r"C:\Users\heamall\Downloads\XRF_exact_format.xlsx - Sheet1.csv"
+
+# ============================================================
+# OUTPUT FOLDER
+# ============================================================
+output_folder = os.path.join(os.path.dirname(file_path), "XRF_Ternary_Plots")
+os.makedirs(output_folder, exist_ok=True)
+
+output_pdf = os.path.join(
+    output_folder,
+    "Fe_Al_SiO2_ternary_plot_final_clean.pdf"
+)
+
+# ============================================================
+# STYLE
+# ============================================================
+plt.rcParams.update({
+    "font.family": "DejaVu Sans",
+    "font.size": 12,
+    "axes.titlesize": 24,
+    "legend.fontsize": 12,
+    "legend.title_fontsize": 12,
+    "pdf.fonttype": 42,
+})
+
+# ============================================================
+# LOAD DATA
+# ============================================================
+df = pd.read_csv(file_path)
+
+row_label_col = df.columns[0]
+sample_col = "SAMPLE"
+
+# ============================================================
+# HELPER FUNCTIONS
+# ============================================================
+def format_sample_name(name):
+    name = str(name).replace("-", "").strip()
+    return re.sub(r"([A-Za-z]+)(\d+)", r"\1-\2", name)
+
+def get_group(sample):
+    sample = str(sample).upper()
+
+    if sample.startswith("KKF"):
+        return "KKF"
+    if sample.startswith("KK"):
+        return "KK"
+    if sample.startswith("GK"):
+        return "GK"
+    if sample.startswith("HH"):
+        return "HH"
+
+    match = re.match(r"([A-Za-z]+)", sample)
+    return match.group(1) if match else sample
+
+def get_sample_number(sample):
+    match = re.search(r"\d+", str(sample))
+    return match.group(0) if match else ""
+
+def pretty_oxide_label(label):
+    subscript_map = str.maketrans("0123456789", "₀₁₂₃₄₅₆₇₈₉")
+    return str(label).translate(subscript_map)
+
+# ============================================================
+# EXTRACT AVERAGE ROWS
+# ============================================================
+needed_cols = ["Fe2O3", "Al2O3", "SiO2"]
+records = []
+
+for i in range(len(df)):
+    sample_name = df.loc[i, sample_col]
+
+    if pd.notna(sample_name):
+        sample_name = format_sample_name(sample_name)
+
+        if (
+            i + 1 < len(df)
+            and str(df.loc[i + 1, row_label_col]).strip().lower() == "average"
+        ):
+            record = {"Sample": sample_name}
+
+            for col in needed_cols:
+                record[col] = pd.to_numeric(df.loc[i + 1, col], errors="coerce")
+
+            records.append(record)
+
+plot_df = pd.DataFrame(records)
+plot_df = plot_df.dropna(subset=needed_cols).copy()
+
+# ============================================================
+# NORMALISE TO 100%
+# Fe2O3 + Al2O3 + SiO2 = 100
+# ============================================================
+plot_df["Total"] = plot_df[needed_cols].sum(axis=1)
+
+plot_df["Fe"] = plot_df["Fe2O3"] / plot_df["Total"] * 100
+plot_df["Al"] = plot_df["Al2O3"] / plot_df["Total"] * 100
+plot_df["Si"] = plot_df["SiO2"] / plot_df["Total"] * 100
+
+plot_df["Group"] = plot_df["Sample"].apply(get_group)
+plot_df["Number"] = plot_df["Sample"].apply(get_sample_number)
+
+# ============================================================
+# COLOURS
+# ============================================================
+group_colours = {
+    "GK":  "#FFD000",  # yellow
+    "HH":  "#E84A2A",  # orange-red
+    "KK":  "#7B2CBF",  # purple
+    "KKF": "#00A6D6",  # cyan-blue
+}
+
+fallback_colours = ["#00A65A", "#FF1493", "#1F77B4", "#8B4513"]
+
+for group in sorted(plot_df["Group"].unique()):
+    if group not in group_colours:
+        group_colours[group] = fallback_colours[len(group_colours) % len(fallback_colours)]
+
+# ============================================================
+# TERNARY GEOMETRY
+# Fe2O3 = top
+# SiO2  = bottom left
+# Al2O3 = bottom right
+# ============================================================
+SQRT3 = np.sqrt(3)
+
+SI_VERTEX = np.array([0.0, 0.0])
+AL_VERTEX = np.array([1.0, 0.0])
+FE_VERTEX = np.array([0.5, SQRT3 / 2])
+
+def ternary_to_xy(fe, al, si):
+    total = fe + al + si
+
+    fe = fe / total
+    al = al / total
+    si = si / total
+
+    x = al + 0.5 * fe
+    y = (SQRT3 / 2) * fe
+
+    return x, y
+
+def offset_point(p1, p2, offset, side="outside"):
+    """
+    Returns two points parallel to the line p1-p2, offset by a fixed distance.
+    side='outside' is manually controlled by offset sign.
+    """
+    p1 = np.array(p1)
+    p2 = np.array(p2)
+
+    direction = p2 - p1
+    direction = direction / np.linalg.norm(direction)
+
+    normal = np.array([-direction[1], direction[0]])
+
+    return p1 + offset * normal, p2 + offset * normal
+
+# ============================================================
+# FIGURE
+# ============================================================
+fig, ax = plt.subplots(figsize=(11, 9))
+
+# ============================================================
+# TRIANGLE OUTLINE
+# ============================================================
+triangle_x = [SI_VERTEX[0], AL_VERTEX[0], FE_VERTEX[0], SI_VERTEX[0]]
+triangle_y = [SI_VERTEX[1], AL_VERTEX[1], FE_VERTEX[1], SI_VERTEX[1]]
+
+ax.plot(
+    triangle_x,
+    triangle_y,
+    color="black",
+    linewidth=1.8,
+    zorder=2
+)
+
+# ============================================================
+# GRIDLINES
+# ============================================================
+for v in range(10, 100, 10):
+    # constant Fe
+    x1, y1 = ternary_to_xy(v, 0, 100 - v)
+    x2, y2 = ternary_to_xy(v, 100 - v, 0)
+    ax.plot([x1, x2], [y1, y2], "--", color="grey", linewidth=0.7, alpha=0.38, zorder=1)
+
+    # constant Al
+    x1, y1 = ternary_to_xy(0, v, 100 - v)
+    x2, y2 = ternary_to_xy(100 - v, v, 0)
+    ax.plot([x1, x2], [y1, y2], "--", color="grey", linewidth=0.7, alpha=0.38, zorder=1)
+
+    # constant Si
+    x1, y1 = ternary_to_xy(0, 100 - v, v)
+    x2, y2 = ternary_to_xy(100 - v, 0, v)
+    ax.plot([x1, x2], [y1, y2], "--", color="grey", linewidth=0.7, alpha=0.38, zorder=1)
+
+# ============================================================
+# INTERNAL PERCENTAGE LABELS
+# Simple clean 20, 40, 60, 80 labels
+# ============================================================
+label_box = dict(
+    boxstyle="round,pad=0.10",
+    facecolor="white",
+    edgecolor="none",
+    alpha=0.75
+)
+
+for v in range(20, 100, 20):
+    # Fe percentage labels: horizontal gridlines
+    x, y = ternary_to_xy(v, 50 - v / 2, 50 - v / 2)
+    ax.text(
+        x,
+        y,
+        str(v),
+        ha="center",
+        va="center",
+        fontsize=9,
+        bbox=label_box,
+        zorder=3
+    )
+
+    # Al percentage labels: lines parallel to left edge
+    x, y = ternary_to_xy(50 - v / 2, v, 50 - v / 2)
+    ax.text(
+        x,
+        y,
+        str(v),
+        rotation=60,
+        ha="center",
+        va="center",
+        fontsize=9,
+        bbox=label_box,
+        zorder=3
+    )
+
+    # Si percentage labels: lines parallel to right edge
+    x, y = ternary_to_xy(50 - v / 2, 50 - v / 2, v)
+    ax.text(
+        x,
+        y,
+        str(v),
+        rotation=-60,
+        ha="center",
+        va="center",
+        fontsize=9,
+        bbox=label_box,
+        zorder=3
+    )
+
+# ============================================================
+# DATA POINTS
+# ============================================================
+for _, row in plot_df.iterrows():
+    x, y = ternary_to_xy(row["Fe"], row["Al"], row["Si"])
+
+    ax.scatter(
+        x,
+        y,
+        s=68,
+        color=group_colours[row["Group"]],
+        edgecolor="black",
+        linewidth=0.85,
+        zorder=5
+    )
+
+    ax.text(
+        x,
+        y + 0.022,
+        row["Number"],
+        ha="center",
+        va="bottom",
+        fontsize=10,
+        weight="bold",
+        color="black",
+        zorder=6
+    )
+
+# ============================================================
+# CORNER LABELS AND 100%
+# Anchored directly at triangle corners
+# ============================================================
+ax.text(
+    FE_VERTEX[0],
+    FE_VERTEX[1] + 0.040,
+    pretty_oxide_label("Fe2O3"),
+    ha="center",
+    va="bottom",
+    fontsize=18,
+    weight="bold"
+)
+ax.text(
+    FE_VERTEX[0],
+    FE_VERTEX[1] + 0.012,
+    "100%",
+    ha="center",
+    va="bottom",
+    fontsize=11
+)
+
+ax.text(
+    SI_VERTEX[0],
+    SI_VERTEX[1] - 0.040,
+    pretty_oxide_label("SiO2"),
+    ha="center",
+    va="top",
+    fontsize=18,
+    weight="bold"
+)
+ax.text(
+    SI_VERTEX[0],
+    SI_VERTEX[1] - 0.070,
+    "100%",
+    ha="center",
+    va="top",
+    fontsize=11
+)
+
+ax.text(
+    AL_VERTEX[0],
+    AL_VERTEX[1] - 0.040,
+    pretty_oxide_label("Al2O3"),
+    ha="center",
+    va="top",
+    fontsize=18,
+    weight="bold"
+)
+ax.text(
+    AL_VERTEX[0],
+    AL_VERTEX[1] - 0.070,
+    "100%",
+    ha="center",
+    va="top",
+    fontsize=11
+)
+
+# ============================================================
+# OUTSIDE ARROWS
+# These are rebuilt from scratch.
+# Each arrow is parallel to the relevant triangle edge and offset
+# by the same visual distance from the triangle.
+# Direction points toward the 100% corner for that oxide.
+# ============================================================
+arrow_style = dict(
+    arrowstyle="-|>",
+    lw=1.55,
+    color="black",
+    mutation_scale=15,
+    shrinkA=0,
+    shrinkB=0
+)
+
+arrow_offset = 0.075
+
+# ------------------------------------------------------------
+# Fe2O3 increasing
+# Parallel to left edge, pointing toward Fe2O3 apex
+# Left edge direction: Si -> Fe
+# Offset outward to left side of triangle
+# ------------------------------------------------------------
+fe_start_base = SI_VERTEX + 0.34 * (FE_VERTEX - SI_VERTEX)
+fe_end_base   = SI_VERTEX + 0.68 * (FE_VERTEX - SI_VERTEX)
+
+fe_start, fe_end = offset_point(
+    fe_start_base,
+    fe_end_base,
+    -arrow_offset
+)
+
+ax.annotate(
+    "",
+    xy=fe_end,
+    xytext=fe_start,
+    arrowprops=arrow_style,
+    zorder=4
+)
+
+fe_mid = (fe_start + fe_end) / 2
+ax.text(
+    fe_mid[0] - 0.045,
+    fe_mid[1],
+    "Fe₂O₃ increasing",
+    rotation=60,
+    ha="center",
+    va="center",
+    fontsize=11
+)
+
+# ------------------------------------------------------------
+# Al2O3 increasing
+# Parallel to bottom edge, pointing toward Al2O3 corner
+# Bottom edge direction: Si -> Al
+# Offset downward outside triangle
+# ------------------------------------------------------------
+al_start_base = SI_VERTEX + 0.32 * (AL_VERTEX - SI_VERTEX)
+al_end_base   = SI_VERTEX + 0.78 * (AL_VERTEX - SI_VERTEX)
+
+al_start, al_end = offset_point(
+    al_start_base,
+    al_end_base,
+    -arrow_offset
+)
+
+ax.annotate(
+    "",
+    xy=al_end,
+    xytext=al_start,
+    arrowprops=arrow_style,
+    zorder=4
+)
+
+al_mid = (al_start + al_end) / 2
+ax.text(
+    al_mid[0],
+    al_mid[1] - 0.040,
+    "Al₂O₃ increasing",
+    ha="center",
+    va="top",
+    fontsize=11
+)
+
+# ------------------------------------------------------------
+# SiO2 increasing
+# Parallel to right edge, pointing toward SiO2 corner direction.
+# On a ternary plot, SiO2 increases away from the right edge
+# toward the bottom-left SiO2 apex.
+#
+# To keep it outside and visually clean, the arrow is drawn
+# parallel to the right edge but points down-left.
+# ------------------------------------------------------------
+si_start_base = FE_VERTEX + 0.28 * (AL_VERTEX - FE_VERTEX)
+si_end_base   = FE_VERTEX + 0.62 * (AL_VERTEX - FE_VERTEX)
+
+# Right edge outside is to the right, so positive offset
+si_start, si_end = offset_point(
+    si_start_base,
+    si_end_base,
+    arrow_offset
+)
+
+# Reverse the arrow direction so it points down-left toward SiO2 enrichment
+ax.annotate(
+    "",
+    xy=si_end,
+    xytext=si_start,
+    arrowprops=arrow_style,
+    zorder=4
+)
+
+si_mid = (si_start + si_end) / 2
+ax.text(
+    si_mid[0] + 0.055,
+    si_mid[1],
+    "SiO₂ increasing",
+    rotation=-60,
+    ha="center",
+    va="center",
+    fontsize=11
+)
+
+# ============================================================
+# LEGEND
+# ============================================================
+legend_items = [
+    Line2D(
+        [0],
+        [0],
+        marker="o",
+        color="w",
+        markerfacecolor=group_colours[group],
+        markeredgecolor="black",
+        label=group,
+        markersize=10
+    )
+    for group in sorted(plot_df["Group"].unique())
+]
+
+ax.legend(
+    handles=legend_items,
+    title="Sample group",
+    loc="upper left",
+    bbox_to_anchor=(1.03, 1.00),
+    frameon=True
+)
+
+# ============================================================
+# FINAL FORMATTING
+# ============================================================
+ax.set_title(
+    "Fe₂O₃-Al₂O₃-SiO₂ ternary plot",
+    weight="bold",
+    pad=32
+)
+
+ax.set_aspect("equal")
+ax.set_xlim(-0.20, 1.22)
+ax.set_ylim(-0.18, SQRT3 / 2 + 0.18)
+ax.axis("off")
+
+plt.tight_layout()
+plt.savefig(output_pdf, dpi=300, bbox_inches="tight")
+plt.show()
+
+print("Saved PDF to:")
+print(output_pdf)
